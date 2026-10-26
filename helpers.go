@@ -44,8 +44,15 @@ type RowData struct {
 // asVectorType attempts to convert a NativeType(custom) which represents a VectorType
 // into a concrete VectorType. It also works recursively (nested vectors).
 func asVectorType(t TypeInfo) (VectorType, bool) {
+	return asVectorTypeAt(t, 0)
+}
+
+func asVectorTypeAt(t TypeInfo, depth int) (VectorType, bool) {
 	if v, ok := t.(VectorType); ok {
 		return v, true
+	}
+	if depth > maxTypeInfoDepth {
+		return VectorType{}, false
 	}
 	n, ok := t.(NativeType)
 	if !ok || n.Type() != TypeCustom {
@@ -69,9 +76,9 @@ func asVectorType(t TypeInfo) (VectorType, bool) {
 	if err != nil || dim < 1 {
 		return VectorType{}, false
 	}
-	subType := getCassandraLongType(subStr, n.Version(), nopLogger{})
+	subType := getCassandraLongTypeAt(subStr, n.Version(), nopLogger{}, depth+1)
 	// recurse if subtype itself is still a custom vector
-	if innerVec, ok := asVectorType(subType); ok {
+	if innerVec, ok := asVectorTypeAt(subType, depth+1); ok {
 		subType = innerVec
 	}
 	return VectorType{
@@ -204,16 +211,25 @@ func dereference(i any) any {
 // TODO: Cover with unit tests.
 // Parses long Java-style type definition to internal data structures.
 func getCassandraLongType(name string, protoVer byte, logger StdLogger) TypeInfo {
+	return getCassandraLongTypeAt(name, protoVer, logger, 0)
+}
+
+func getCassandraLongTypeAt(name string, protoVer byte, logger StdLogger, depth int) TypeInfo {
+	if depth > maxTypeInfoDepth {
+		logger.Printf("gocql: error parsing type %q: nesting exceeds %d levels\n", name, maxTypeInfoDepth)
+		return NewCustomType(protoVer, TypeCustom, name)
+	}
+
 	const prefix = apacheCassandraTypePrefix
 	if strings.HasPrefix(name, prefix+"SetType") {
 		return CollectionType{
 			NativeType: NewNativeType(protoVer, TypeSet),
-			Elem:       getCassandraLongType(unwrapCompositeTypeDefinition(name, prefix+"SetType", '('), protoVer, logger),
+			Elem:       getCassandraLongTypeAt(unwrapCompositeTypeDefinition(name, prefix+"SetType", '('), protoVer, logger, depth+1),
 		}
 	} else if strings.HasPrefix(name, prefix+"ListType") {
 		return CollectionType{
 			NativeType: NewNativeType(protoVer, TypeList),
-			Elem:       getCassandraLongType(unwrapCompositeTypeDefinition(name, prefix+"ListType", '('), protoVer, logger),
+			Elem:       getCassandraLongTypeAt(unwrapCompositeTypeDefinition(name, prefix+"ListType", '('), protoVer, logger, depth+1),
 		}
 	} else if strings.HasPrefix(name, prefix+"MapType") {
 		names := splitJavaCompositeTypes(name, prefix+"MapType")
@@ -223,15 +239,15 @@ func getCassandraLongType(name string, protoVer byte, logger StdLogger) TypeInfo
 		}
 		return CollectionType{
 			NativeType: NewNativeType(protoVer, TypeMap),
-			Key:        getCassandraLongType(names[0], protoVer, logger),
-			Elem:       getCassandraLongType(names[1], protoVer, logger),
+			Key:        getCassandraLongTypeAt(names[0], protoVer, logger, depth+1),
+			Elem:       getCassandraLongTypeAt(names[1], protoVer, logger, depth+1),
 		}
 	} else if strings.HasPrefix(name, prefix+"TupleType") {
 		names := splitJavaCompositeTypes(name, prefix+"TupleType")
 		types := make([]TypeInfo, len(names))
 
 		for i, name := range names {
-			types[i] = getCassandraLongType(name, protoVer, logger)
+			types[i] = getCassandraLongTypeAt(name, protoVer, logger, depth+1)
 		}
 
 		return TupleTypeInfo{
@@ -256,7 +272,7 @@ func getCassandraLongType(name string, protoVer byte, logger StdLogger) TypeInfo
 			fieldName, _ := hex.DecodeString(spec[0])
 			fields[i-2] = UDTField{
 				Name: string(fieldName),
-				Type: getCassandraLongType(spec[1], protoVer, logger),
+				Type: getCassandraLongTypeAt(spec[1], protoVer, logger, depth+1),
 			}
 		}
 
@@ -283,7 +299,7 @@ func getCassandraLongType(name string, protoVer byte, logger StdLogger) TypeInfo
 			logger.Printf("gocql: error parsing vector type %q: missing element type\n", name)
 			return NewCustomType(protoVer, TypeCustom, name)
 		}
-		subType := getCassandraLongType(elem, protoVer, logger)
+		subType := getCassandraLongTypeAt(elem, protoVer, logger, depth+1)
 		// A negative dimension reaches unmarshalVector's MakeSlice.
 		dim, err := strconv.Atoi(strings.TrimSpace(names[1]))
 		if err != nil {
@@ -303,7 +319,7 @@ func getCassandraLongType(name string, protoVer byte, logger StdLogger) TypeInfo
 		}
 	} else if strings.HasPrefix(name, prefix+"FrozenType") {
 		names := splitJavaCompositeTypes(name, prefix+"FrozenType")
-		return getCassandraLongType(strings.TrimSpace(names[0]), protoVer, logger)
+		return getCassandraLongTypeAt(strings.TrimSpace(names[0]), protoVer, logger, depth+1)
 	} else {
 		// basic type
 		typ := getApacheCassandraType(name)

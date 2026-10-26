@@ -270,3 +270,120 @@ func TestGetCassandraLongTypeLogsWhyADimensionWasRejected(t *testing.T) {
 		})
 	}
 }
+
+func nestedJavaListType(levels int) string {
+	const p = apacheCassandraTypePrefix
+	var b strings.Builder
+	b.Grow(levels*(len(p)+len("ListType()")) + len(p) + len("Int32Type"))
+	for i := 0; i < levels; i++ {
+		b.WriteString(p)
+		b.WriteString("ListType(")
+	}
+	b.WriteString(p)
+	b.WriteString("Int32Type")
+	for i := 0; i < levels; i++ {
+		b.WriteByte(')')
+	}
+	return b.String()
+}
+
+func nestedJavaFrozenType(levels int) string {
+	const p = apacheCassandraTypePrefix
+	var b strings.Builder
+	b.Grow(levels*(len(p)+len("FrozenType()")) + len(p) + len("Int32Type"))
+	for i := 0; i < levels; i++ {
+		b.WriteString(p)
+		b.WriteString("FrozenType(")
+	}
+	b.WriteString(p)
+	b.WriteString("Int32Type")
+	for i := 0; i < levels; i++ {
+		b.WriteByte(')')
+	}
+	return b.String()
+}
+
+func nestedJavaVectorType(levels int) string {
+	const p = apacheCassandraTypePrefix
+	var b strings.Builder
+	b.Grow(levels*(len(p)+len("VectorType(, 1)")) + len(p) + len("FloatType"))
+	for i := 0; i < levels; i++ {
+		b.WriteString(p)
+		b.WriteString("VectorType(")
+	}
+	b.WriteString(p)
+	b.WriteString("FloatType")
+	for i := 0; i < levels; i++ {
+		b.WriteString(", 1)")
+	}
+	return b.String()
+}
+
+func innermostCompositeElem(t TypeInfo) TypeInfo {
+	for {
+		switch v := t.(type) {
+		case CollectionType:
+			t = v.Elem
+		case VectorType:
+			t = v.SubType
+		default:
+			return t
+		}
+	}
+}
+
+// TestGetCassandraLongTypeRejectsExcessiveNesting pins that a Java type name
+// nested past maxTypeInfoDepth degrades instead of overflowing the stack. The
+// matching binary parser in readTypeInfo panics with a malformedFrameError;
+// this parser has no recover, so a too-deep name stays an opaque custom type.
+func TestGetCassandraLongTypeRejectsExcessiveNesting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		typ  string
+	}{
+		{name: "list", typ: nestedJavaListType(maxTypeInfoDepth + 1)},
+		{name: "frozen", typ: nestedJavaFrozenType(maxTypeInfoDepth + 1)},
+		{name: "vector", typ: nestedJavaVectorType(maxTypeInfoDepth + 1)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			logger := &testLogger{}
+			got := getCassandraLongType(test.typ, 0, logger)
+			if !strings.Contains(logger.String(), "nesting exceeds") {
+				t.Errorf("getCassandraLongType logged %q, want it to contain the nesting limit", logger.String())
+			}
+
+			leaf := innermostCompositeElem(got)
+			if leaf.Type() != TypeCustom {
+				t.Errorf("innermost type is %s (%#v), want custom after the nesting limit", leaf.Type(), leaf)
+			}
+
+			// asVectorType re-enters the same parser; it must also stop short of a stack overflow.
+			_, _ = asVectorType(NewCustomType(0, TypeCustom, test.typ))
+		})
+	}
+}
+
+// TestGetCassandraLongTypeAcceptsMaxNesting pins that the bound did not reject
+// a Java list type nested exactly as deep as the binary parser allows.
+func TestGetCassandraLongTypeAcceptsMaxNesting(t *testing.T) {
+	t.Parallel()
+
+	logger := &testLogger{}
+	got := getCassandraLongType(nestedJavaListType(maxTypeInfoDepth), 0, logger)
+	if log := logger.String(); log != "" {
+		t.Errorf("getCassandraLongType logged %q for a type at the nesting limit", log)
+	}
+	n, leaf := nestedCollectionCount(got)
+	if n != maxTypeInfoDepth {
+		t.Fatalf("nested %d lists, want %d", n, maxTypeInfoDepth)
+	}
+	if leaf.Type() != TypeInt {
+		t.Fatalf("innermost type is %s, want int", leaf.Type())
+	}
+}

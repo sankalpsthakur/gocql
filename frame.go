@@ -834,9 +834,23 @@ func (w *writePrepareFrame) buildFrame(f *framer, streamID int) error {
 	return f.finish()
 }
 
+// maxTypeInfoDepth is the deepest nested collection, tuple, UDT, vector, or
+// frozen type a frame may declare. Real schemas nest a handful of levels. A
+// 4 MB body of TypeList shorts otherwise overflows the goroutine stack, which
+// is a fatal error recover cannot catch, so the process dies. See #1104.
+const maxTypeInfoDepth = 32
+
 func (f *framer) readTypeInfo() TypeInfo {
+	return f.readTypeInfoAt(0)
+}
+
+func (f *framer) readTypeInfoAt(depth int) TypeInfo {
 	// TODO: factor this out so the same code paths can be used to parse custom
 	// types and other types, as much of the logic will be duplicated.
+	if depth > maxTypeInfoDepth {
+		panic(malformedFramef("type nesting exceeds %d levels", maxTypeInfoDepth))
+	}
+
 	id := f.readShort()
 
 	simple := NativeType{
@@ -865,7 +879,7 @@ func (f *framer) readTypeInfo() TypeInfo {
 		}
 
 		for i := 0; i < int(n); i++ {
-			tuple.Elems[i] = f.readTypeInfo()
+			tuple.Elems[i] = f.readTypeInfoAt(depth + 1)
 		}
 
 		return tuple
@@ -882,7 +896,7 @@ func (f *framer) readTypeInfo() TypeInfo {
 		for i := 0; i < int(n); i++ {
 			field := &udt.Elements[i]
 			field.Name = f.readString()
-			field.Type = f.readTypeInfo()
+			field.Type = f.readTypeInfoAt(depth + 1)
 		}
 
 		return udt
@@ -892,16 +906,16 @@ func (f *framer) readTypeInfo() TypeInfo {
 		}
 
 		if simple.typ == TypeMap {
-			collection.Key = f.readTypeInfo()
+			collection.Key = f.readTypeInfoAt(depth + 1)
 		}
 
-		collection.Elem = f.readTypeInfo()
+		collection.Elem = f.readTypeInfoAt(depth + 1)
 
 		return collection
 	case TypeCustom:
 		vectorTypePrefix := apacheCassandraTypePrefix + "VectorType"
 		if strings.HasPrefix(simple.custom, vectorTypePrefix) {
-			return f.readVectorTypeInfo(simple, vectorTypePrefix)
+			return f.readVectorTypeInfo(simple, vectorTypePrefix, depth+1)
 		}
 	}
 
@@ -912,7 +926,7 @@ func (f *framer) readTypeInfo() TypeInfo {
 // Every part is checked before it is sliced: an unchecked index raises a
 // runtime.Error, which parseFrame's recover re-panics by design. A name that only
 // starts with the prefix is not a vector and degrades to the plain custom type.
-func (f *framer) readVectorTypeInfo(simple NativeType, vectorTypePrefix string) TypeInfo {
+func (f *framer) readVectorTypeInfo(simple NativeType, vectorTypePrefix string, depth int) TypeInfo {
 	rest := simple.custom[len(vectorTypePrefix):]
 	switch {
 	case rest == "":
@@ -946,7 +960,7 @@ func (f *framer) readVectorTypeInfo(simple NativeType, vectorTypePrefix string) 
 
 	return VectorType{
 		NativeType: simple,
-		SubType:    getCassandraLongType(typeStr, f.proto, nopLogger{}),
+		SubType:    getCassandraLongTypeAt(typeStr, f.proto, nopLogger{}, depth),
 		Dimensions: dim,
 	}
 }

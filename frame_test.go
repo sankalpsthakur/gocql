@@ -1817,6 +1817,172 @@ func TestParseResultRowsRejectsMalformedVectorType(t *testing.T) {
 	}
 }
 
+// writeNestedType appends `depth` nested values of kind, each wrapping the next,
+// terminating in TypeInt. Map keys are TypeInt; tuples and UDTs have one field.
+func writeNestedType(f *framer, kind Type, depth int) {
+	for i := 0; i < depth; i++ {
+		f.writeShort(uint16(kind))
+		switch kind {
+		case TypeMap:
+			f.writeShort(uint16(TypeInt))
+		case TypeTuple:
+			f.writeShort(1)
+		case TypeUDT:
+			f.writeString("ks")
+			f.writeString("udt")
+			f.writeShort(1)
+			f.writeString("f")
+		}
+	}
+	f.writeShort(uint16(TypeInt))
+}
+
+func writeRowsResultWithNestedLists(fr *framer, lists int) {
+	fr.writeInt(frm.ResultKindRows)
+	fr.writeInt(int32(frm.FlagGlobalTableSpec))
+	fr.writeInt(1) // colCount
+	fr.writeString("gocql_test")
+	fr.writeString("t")
+	fr.writeString("c")
+	if lists > 0 {
+		fr.buf = append(fr.buf, bytes.Repeat([]byte{0x00, byte(TypeList)}, lists)...)
+	}
+	fr.writeShort(uint16(TypeInt))
+	fr.writeInt(0) // numRows
+}
+
+func nestedCollectionCount(t TypeInfo) (int, TypeInfo) {
+	n := 0
+	for {
+		c, ok := t.(CollectionType)
+		if !ok {
+			return n, t
+		}
+		n++
+		t = c.Elem
+	}
+}
+
+// TestReadTypeInfoRejectsExcessiveNesting pins that a column type nested past
+// maxTypeInfoDepth panics with a malformedFrameError, which parseFrame converts,
+// instead of overflowing the goroutine stack (a fatal error recover cannot catch).
+func TestReadTypeInfoRejectsExcessiveNesting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		kind Type
+	}{
+		{name: "list", kind: TypeList},
+		{name: "set", kind: TypeSet},
+		{name: "map", kind: TypeMap},
+		{name: "tuple", kind: TypeTuple},
+		{name: "udt", kind: TypeUDT},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFramer(nil, protoVersion4)
+			writeNestedType(f, test.kind, maxTypeInfoDepth+1)
+
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("excessive type nesting was accepted")
+				}
+				mf, ok := r.(malformedFrameError)
+				if !ok {
+					t.Fatalf("panicked with %T, which parseFrame re-panics instead of converting: %v", r, r)
+				}
+				if !strings.Contains(mf.Error(), "nesting exceeds") {
+					t.Errorf("the error does not name the nesting limit: %v", mf)
+				}
+			}()
+
+			f.readTypeInfo()
+		})
+	}
+}
+
+// TestReadTypeInfoAcceptsMaxNesting pins that the bound did not reject a type
+// nested exactly as deep as a real schema is allowed to go.
+func TestReadTypeInfoAcceptsMaxNesting(t *testing.T) {
+	t.Parallel()
+
+	f := newFramer(nil, protoVersion4)
+	writeNestedType(f, TypeList, maxTypeInfoDepth)
+
+	info := f.readTypeInfo()
+	n, leaf := nestedCollectionCount(info)
+	if n != maxTypeInfoDepth {
+		t.Fatalf("nested %d lists, want %d", n, maxTypeInfoDepth)
+	}
+	if leaf.Type() != TypeInt {
+		t.Fatalf("innermost type is %s, want int", leaf.Type())
+	}
+}
+
+// TestParseResultRowsRejectsExcessiveTypeNesting drives the same bound through
+// parseFrame, including the 2M nested TypeList shorts from #1104 that overflow
+// the stack without it. recoverMalformedFrame must turn that into an error.
+func TestParseResultRowsRejectsExcessiveTypeNesting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		lists int
+	}{
+		{name: "one past the bound", lists: maxTypeInfoDepth + 1},
+		{name: "4 MB of TypeList shorts", lists: 2_000_000},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			fr := newFramer(nil, protoVersion4)
+			fr.header = &frm.FrameHeader{Version: protoVersion4 | 0x80, Op: frm.OpResult}
+			writeRowsResultWithNestedLists(fr, test.lists)
+
+			frame, err := fr.parseFrame()
+			if err == nil {
+				t.Fatalf("expected an error for %d nested lists, got frame %+v", test.lists, frame)
+			}
+			if frame != nil {
+				t.Errorf("expected nil frame on error, got %+v", frame)
+			}
+			if !strings.Contains(err.Error(), "nesting exceeds") {
+				t.Errorf("the error does not name the nesting limit: %v", err)
+			}
+		})
+	}
+}
+
+// TestParseResultRowsAcceptsMaxTypeNesting pins the bound through parseFrame
+// so a list nested exactly maxTypeInfoDepth deep remains a protocol-legal type.
+func TestParseResultRowsAcceptsMaxTypeNesting(t *testing.T) {
+	t.Parallel()
+
+	fr := newFramer(nil, protoVersion4)
+	fr.header = &frm.FrameHeader{Version: protoVersion4 | 0x80, Op: frm.OpResult}
+	writeRowsResultWithNestedLists(fr, maxTypeInfoDepth)
+
+	frame, err := fr.parseFrame()
+	require.NoError(t, err)
+	rows, ok := frame.(*resultRowsFrame)
+	require.True(t, ok, "expected a resultRowsFrame, got %T", frame)
+	require.Len(t, rows.meta.columns, 1)
+	n, leaf := nestedCollectionCount(rows.meta.columns[0].TypeInfo)
+	if n != maxTypeInfoDepth {
+		t.Fatalf("nested %d lists, want %d", n, maxTypeInfoDepth)
+	}
+	if leaf.Type() != TypeInt {
+		t.Fatalf("innermost type is %s, want int", leaf.Type())
+	}
+}
+
 // Test_framer_v4SnappyRoundTrip drives a real body through the protocol v4 compression
 // path and back: framer.finish() compresses the body and rewrites the header length,
 // framer.readFrame() reads that length and decompresses it again.

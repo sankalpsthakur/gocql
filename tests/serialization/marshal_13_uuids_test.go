@@ -93,11 +93,25 @@ func TestMarshalUUIDs(t *testing.T) {
 			serialization.PositiveSet{
 				Data: []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 				Values: mod.Values{
+					"00000000-0000-0000-0000-000000000000",
 					[]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 					[16]byte{},
 					gocql.UUID{},
 				}.AddVariants(mod.All...),
 			}.Run("zeros", t, marshal, unmarshal)
+
+			// Alternative spellings of the zero UUID. Unmarshal always
+			// returns the canonical form, so these are marshal-only. timeuuid
+			// used to special-case only the canonical spelling (#1120).
+			serialization.PositiveSet{
+				Data: []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+				Values: mod.Values{
+					"{00000000-0000-0000-0000-000000000000}",
+					"00000000000000000000000000000000",
+					"urn:uuid:00000000-0000-0000-0000-000000000000",
+					"URN:UUID:00000000-0000-0000-0000-000000000000",
+				}.AddVariants(mod.All...),
+			}.Run("zero_string_forms", t, marshal, nil)
 
 			serialization.PositiveSet{
 				Data: []byte("\xe9\x39\xf5\x2a\xd6\x90\x11\xef\x9c\xd2\x02\x42\xac\x12\x00\x02"),
@@ -175,11 +189,30 @@ func TestMarshalTimeUUID(t *testing.T) {
 			t.Parallel()
 
 			serialization.PositiveSet{
-				Data: make([]byte, 0),
+				Data: []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 				Values: mod.Values{
 					"00000000-0000-0000-0000-000000000000",
 				}.AddVariants(mod.All...),
 			}.Run("zero", t, marshal, unmarshal)
+
+			// 49-character urn:timeuuid: spelling of the zero UUID.
+			// serialization/uuid does not accept this prefix. Marshal-only:
+			// unmarshal returns the canonical form.
+			serialization.PositiveSet{
+				Data: []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+				Values: mod.Values{
+					"urn:timeuuid:00000000-0000-0000-0000-000000000000",
+					"URN:TIMEUUID:00000000-0000-0000-0000-000000000000",
+				}.AddVariants(mod.All...),
+			}.Run("zero_timeuuid_urn", t, marshal, nil)
+
+			serialization.PositiveSet{
+				Data: []byte("\xe9\x39\xf5\x2a\xd6\x90\x11\xef\x9c\xd2\x02\x42\xac\x12\x00\x02"),
+				Values: mod.Values{
+					"urn:timeuuid:e939f52a-d690-11ef-9cd2-0242ac120002",
+					"URN:TIMEUUID:E939F52A-D690-11EF-9CD2-0242AC120002",
+				}.AddVariants(mod.All...),
+			}.Run("timeuuid_urn", t, marshal, nil)
 
 			serialization.PositiveSet{
 				Data: []byte("\xff\xff\xff\xff\xff\xff\x1f\xff\xff\xff\xff\xff\xff\xff\xff\xff"),

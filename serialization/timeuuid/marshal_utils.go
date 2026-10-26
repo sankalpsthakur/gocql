@@ -6,6 +6,14 @@ import (
 	"strings"
 )
 
+// URN prefixes accepted by the string encoders. Lengths are taken from the
+// constants so a prefix cannot be compared against a slice of the wrong width
+// (the original "urn:timeuuid:" check used s[:9] against a 13-byte literal).
+const (
+	urnUUIDPrefix     = "urn:uuid:"
+	urnTimeUUIDPrefix = "urn:timeuuid:"
+)
+
 func EncArray(v [16]byte) ([]byte, error) {
 	return v[:], nil
 }
@@ -115,15 +123,17 @@ func encReflectBytes(rv reflect.Value) ([]byte, error) {
 // The following code was taken from the `Parse` function of the "github.com/google/uuid" package.
 func encReflectString(v reflect.Value) ([]byte, error) {
 	s := v.String()
-	if s == zeroUUID {
-		return make([]byte, 0), nil
-	}
 	switch len(s) {
-	case 45: // urn:uuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-		if !strings.EqualFold(s[:9], "urn:uuid:") {
-			return nil, fmt.Errorf("failed to marshal timeuuid: the (%T) have invalid urn prefix: %q", v.Interface(), s[:9])
+	case 36 + len(urnTimeUUIDPrefix): // urn:timeuuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+		if !strings.EqualFold(s[:len(urnTimeUUIDPrefix)], urnTimeUUIDPrefix) {
+			return nil, fmt.Errorf("failed to marshal timeuuid: the (%T) have invalid urn prefix: %q", v.Interface(), s[:len(urnTimeUUIDPrefix)])
 		}
-		s = s[9:]
+		s = s[len(urnTimeUUIDPrefix):]
+	case 36 + len(urnUUIDPrefix): // urn:uuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+		if !strings.EqualFold(s[:len(urnUUIDPrefix)], urnUUIDPrefix) {
+			return nil, fmt.Errorf("failed to marshal timeuuid: the (%T) have invalid urn prefix: %q", v.Interface(), s[:len(urnUUIDPrefix)])
+		}
+		s = s[len(urnUUIDPrefix):]
 	case 38: // {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
 		s = s[1:]
 	case 36: // xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -140,7 +150,7 @@ func encReflectString(v reflect.Value) ([]byte, error) {
 	case 0:
 		return nil, nil
 	default:
-		return nil, fmt.Errorf("failed to marshal timeuuid: the (%T) length can be 0,32,36,38,45", v.Interface())
+		return nil, fmt.Errorf("failed to marshal timeuuid: the (%T) length can be 0,32,36,38,45,49", v.Interface())
 	}
 
 	// s is now at least 36 bytes long
@@ -168,15 +178,17 @@ func encReflectString(v reflect.Value) ([]byte, error) {
 // encString encodes uuid strings.
 // The following code was taken from the `Parse` function of the "github.com/google/uuid" package.
 func encString(s string) ([]byte, error) {
-	if s == zeroUUID {
-		return make([]byte, 0), nil
-	}
 	switch len(s) {
-	case 45: // urn:uuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-		if !strings.EqualFold(s[:9], "urn:uuid:") {
-			return nil, fmt.Errorf("failed to marshal timeuuid: (string) have invalid urn prefix: %q", s[:9])
+	case 36 + len(urnTimeUUIDPrefix): // urn:timeuuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+		if !strings.EqualFold(s[:len(urnTimeUUIDPrefix)], urnTimeUUIDPrefix) {
+			return nil, fmt.Errorf("failed to marshal timeuuid: (string) have invalid urn prefix: %q", s[:len(urnTimeUUIDPrefix)])
 		}
-		s = s[9:]
+		s = s[len(urnTimeUUIDPrefix):]
+	case 36 + len(urnUUIDPrefix): // urn:uuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+		if !strings.EqualFold(s[:len(urnUUIDPrefix)], urnUUIDPrefix) {
+			return nil, fmt.Errorf("failed to marshal timeuuid: (string) have invalid urn prefix: %q", s[:len(urnUUIDPrefix)])
+		}
+		s = s[len(urnUUIDPrefix):]
 	case 38: // {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
 		s = s[1:]
 	case 36: // xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -193,7 +205,7 @@ func encString(s string) ([]byte, error) {
 	case 0:
 		return nil, nil
 	default:
-		return nil, fmt.Errorf("failed to marshal timeuuid: the (string) length can be 0,32,36,38,45")
+		return nil, fmt.Errorf("failed to marshal timeuuid: the (string) length can be 0,32,36,38,45,49")
 	}
 
 	// s is now at least 36 bytes long

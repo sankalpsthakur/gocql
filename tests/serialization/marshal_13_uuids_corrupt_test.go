@@ -120,10 +120,10 @@ func TestMarshalUUIDsMustFail(t *testing.T) {
 	}
 }
 
-// TestMarshalTimeUUIDMustFail covers the wrong-length arm of DecTime and
-// DecTimeR. It is separate from TestMarshalUUIDsMustFail because time.Time is
-// a timeuuid-only target: uuid.Unmarshal has no case for it, so it cannot join
-// the sets those four suites share.
+// TestMarshalTimeUUIDMustFail covers timeuuid-only failure paths: the
+// urn:timeuuid: prefix reject (uuid has no 49-character branch) and the
+// wrong-length arm of DecTime and DecTimeR (uuid.Unmarshal has no time.Time
+// case). These cannot join the sets the four uuid suites share.
 func TestMarshalTimeUUIDMustFail(t *testing.T) {
 	t.Parallel()
 
@@ -131,25 +131,39 @@ func TestMarshalTimeUUIDMustFail(t *testing.T) {
 
 	type testSuite struct {
 		name      string
+		marshal   func(any) ([]byte, error)
 		unmarshal func(bytes []byte, i any) error
 	}
 
 	testSuites := [2]testSuite{
 		{
 			name:      "serialization.timeuuid",
+			marshal:   timeuuid.Marshal,
 			unmarshal: timeuuid.Unmarshal,
 		},
 		{
 			name:      "glob.timeuuid",
+			marshal:   func(i any) ([]byte, error) { return gocql.Marshal(tType, i) },
 			unmarshal: func(bytes []byte, i any) error { return gocql.Unmarshal(tType, bytes, i) },
 		},
 	}
 
 	for _, tSuite := range testSuites {
+		marshal := tSuite.marshal
 		unmarshal := tSuite.unmarshal
 
 		t.Run(tSuite.name, func(t *testing.T) {
 			t.Parallel()
+
+			// 49-character strings so they reach the urn:timeuuid: prefix
+			// check rather than the length default. One prefix is unrelated,
+			// the other differs from "urn:timeuuid:" by a single character.
+			serialization.NegativeMarshalSet{
+				Values: mod.Values{
+					"xyz:timeuuid:b6b77c23-c776-40ff-828d-a385f3e8a2af",
+					"urn:timeuuiX:b6b77c23-c776-40ff-828d-a385f3e8a2af",
+				}.AddVariants(mod.All...),
+			}.Run("bad_timeuuid_urn_prefix", t, marshal)
 
 			// DecTime accepts only 0 or 16 bytes; anything else is a length
 			// error rather than a partially decoded timestamp.
